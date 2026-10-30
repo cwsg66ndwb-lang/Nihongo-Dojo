@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Nihongo Dojo</title>
+  <meta name="description" content="Offline trainer for hiragana, katakana, vocabulary and pronunciation.">
+  <meta name="theme-color" content="#b3261e">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Nihongo">
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="./icons/icon-192.png">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <main id="app" tabindex="-1"></main>
+
+  <nav class="tabbar" aria-label="Main">
+    <button data-view="home"><span class="ti" aria-hidden="true">🏠</span>Home</button>
+    <button data-view="kana"><span class="ti" lang="ja" aria-hidden="true">あ</span>Kana</button>
+    <button data-view="review"><span class="ti" aria-hidden="true">🃏</span>Review</button>
+    <button data-view="quiz"><span class="ti" aria-hidden="true">✅</span>Quiz</button>
+    <button data-view="words"><span class="ti" aria-hidden="true">📖</span>Words</button>
+    <button data-view="speak"><span class="ti" aria-hidden="true">🎤</span>Speak</button>
+  </nav>
+
+  <div id="toast" role="status" aria-live="polite"></div>
+
+  <noscript>Nihongo Dojo needs JavaScript turned on.</noscript>
+  <script src="./data.js"></script>
+  <script src="./strokes.js"></script>
+  <script src="./app.js"></script>
+</body>
+</html>
