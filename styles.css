@@ -173,8 +173,8 @@ h3 { font-size: 1rem; margin: 18px 0 8px; }
 .legend i.mw { background: var(--bad); }
 
 .kgrid { display: grid; gap: 6px; }
-.kgrid.cols5 { grid-template-columns: repeat(5, 1fr); }
-.kgrid.cols3 { grid-template-columns: repeat(3, 1fr); }
+.kgrid.cols5 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.kgrid.cols3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .kcell {
   appearance: none; position: relative; border: 1px solid var(--line); background: var(--bg); color: var(--ink);
   border-radius: 12px; padding: 6px 2px; min-height: 64px; font: inherit; cursor: pointer;
@@ -305,6 +305,9 @@ input[type="range"] { width: 100%; accent-color: var(--accent); margin-top: 8px;
 .row-romaji { font-size: .85rem; color: var(--accent); font-weight: 600; }
 .row-en { font-size: .95rem; }
 .wrow .icon-btn { font-size: 1.1rem; flex: none; }
+.wrow.long .row { flex-direction: column; align-items: flex-start; gap: 4px; }
+.wrow.long .row-jpbox { flex-basis: auto; }
+.wrow.long .row-main { width: 100%; }
 
 /* ------------------------------------------------ speak */
 .speak-card { cursor: default; }
@@ -322,6 +325,54 @@ input[type="range"] { width: 100%; accent-color: var(--accent); margin-top: 8px;
 }
 .btn.rec.on { background: var(--bad); border-color: var(--bad); color: #fff; animation: pulse 1.2s infinite; }
 .nav-btns .btn { flex: 1; }
+
+/* ------------------------------------------------ practice hub */
+button.card { appearance: none; -webkit-appearance: none; }
+.card.hub {
+  display: flex; align-items: center; gap: 14px; width: 100%; text-align: left; font: inherit; color: var(--ink);
+  cursor: pointer; min-height: 76px;
+}
+.card.hub:active { transform: scale(.99); background: var(--accent-soft); }
+.hub-icon { font-size: 2rem; width: 52px; height: 52px; display: grid; place-items: center; background: var(--bg); border-radius: 14px; flex: none; }
+.next-lesson { margin-top: 10px; justify-content: flex-start; text-align: left; }
+
+/* ------------------------------------------------ kanji */
+.explainer summary { cursor: pointer; font-weight: 700; min-height: 32px; }
+.explainer ul { padding-left: 18px; }
+.readings { display: grid; gap: 8px; margin: 14px 0 4px; }
+.readings.center { justify-items: center; margin: 8px 0; }
+.readings [lang="ja"] { font-size: 1.15rem; }
+.rlabel {
+  display: inline-block; font-size: .72rem; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
+  color: var(--muted); min-width: 70px; margin-right: 4px;
+}
+.readings .chips, .readings > div { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.chip.reading { min-height: 36px; padding: 4px 12px; }
+.chip.reading.on { background: var(--bg); color: var(--ink); border-color: var(--line); }
+.kgrid .kcell .kr { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; padding: 0 2px; }
+
+/* ------------------------------------------------ grammar */
+.lesson-list { list-style: none; margin: 0; padding: 0; }
+.lesson-row { display: flex; align-items: center; gap: 12px; width: 100%; text-align: left; font: inherit; color: var(--ink); cursor: pointer; margin-bottom: 10px; padding: 12px 14px; }
+.lesson-row:active { background: var(--accent-soft); }
+.lesson-n {
+  width: 32px; height: 32px; border-radius: 50%; border: 2px solid var(--line); display: grid; place-items: center;
+  font-weight: 800; flex: none; color: var(--muted);
+}
+.lesson-n.done { background: var(--m3); border-color: var(--m3); color: #fff; }
+.lesson-txt { flex: 1; min-width: 0; }
+.lesson-jp { font-size: 1.6rem; margin: -6px 0 12px; color: var(--accent); }
+.points { padding-left: 20px; margin: 0 0 12px; }
+.points li { margin-bottom: 8px; }
+.pattern { background: var(--bg); border: 1px dashed var(--line); border-radius: 12px; padding: 10px 12px; font-size: 1.1rem; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.check-q { border-top: 1px solid var(--line); padding-top: 10px; margin-top: 10px; }
+.check-q:first-of-type { border-top: 0; margin-top: 0; padding-top: 0; }
+.check-q .q { font-weight: 600; margin: 0 0 8px; }
+.small-opts .btn { min-height: 48px; font-size: 1rem; }
+.small-opts [lang="ja"] { font-size: 1.1rem; }
+.why .ok, .why .no { border-radius: 10px; padding: 8px 10px; margin: 8px 0 0; font-weight: 500; }
+.why .ok { background: var(--ok-soft); color: var(--ok); }
+.why .no { background: var(--bad-soft); color: var(--bad); }
 
 /* ------------------------------------------------ tab bar */
 .tabbar {

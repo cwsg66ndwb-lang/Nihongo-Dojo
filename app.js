@@ -54,7 +54,9 @@ const ITEMS = new Map();
 const VOCAB_ITEMS = [];
 for (const [cat, list] of Object.entries(VOCAB)) {
   for (const [kana, written, romaji, en] of list) {
-    const id = `v:${kana}`;
+    // Homophones (はな = nose / flower) get the written form added to keep ids unique.
+    let id = `v:${kana}`;
+    if (ITEMS.has(id)) id = `v:${kana}|${written}`;
     if (ITEMS.has(id)) { console.warn('Duplicate vocab', kana); continue; }
     const item = { id, type: 'vocab', cat, kana, written: written || kana, romaji, en };
     VOCAB_ITEMS.push(item);
@@ -62,8 +64,28 @@ for (const [cat, list] of Object.entries(VOCAB)) {
   }
 }
 
+const KANJI_ITEMS = [];
+for (const [group, list] of Object.entries(KANJI)) {
+  for (const [char, meaning, on, kun, ex] of list) {
+    const item = {
+      id: `j:${char}`, type: 'kanji', group, char, meaning,
+      on: on ? on.split(' ') : [], kun: kun ? kun.split(' ') : [],
+      ex: ex.map(([written, kana, romaji, en]) => ({ written, kana, romaji, en })),
+    };
+    KANJI_ITEMS.push(item);
+    ITEMS.set(item.id, item);
+  }
+}
+// Example words / sentences as speakable pseudo-items (not tracked in reviews).
+const exampleItem = (e, id, cat) => ({ id, type: 'vocab', cat, kana: e.kana, written: e.written, romaji: e.romaji, en: e.en, pseudo: true });
+const KANJI_WORDS = KANJI_ITEMS.flatMap((k) => k.ex.map((e, i) => exampleItem(e, `jx:${k.char}:${i}`, 'Kanji words')));
+const GRAMMAR_SENTENCES = GRAMMAR.flatMap((g) => g.examples.map(([written, kana, romaji, en], i) => exampleItem({ written, kana, romaji, en }, `gx:${g.id}:${i}`, 'Grammar sentences')));
+const PSEUDO = new Map([...KANJI_WORDS, ...GRAMMAR_SENTENCES].map((x) => [x.id, x]));
+const getItem = (id) => ITEMS.get(id) || PSEUDO.get(id);
+
 const romajiAccepts = (romaji) => [romaji, ...(ROMAJI_ALT[romaji] || [])];
-const speakText = (it) => (it.type === 'kana' ? it.hira : it.written);
+const speakText = (it) => (it.type === 'kana' ? it.hira : it.type === 'kanji' ? it.ex[0].written : it.written);
+const label = (it) => (it.type === 'vocab' ? it.kana : it.char);
 const kanaTip = (it) => KANA_TIPS[it.char] || KANA_TIPS[it.hira] || '';
 
 function examplesFor(it) {
@@ -78,6 +100,7 @@ const DEFAULT_STATE = {
   settings: { voiceURI: '', rate: 0.85, newPerDay: 15, showRomaji: true },
   streak: { last: '', count: 0 },
   daily: { date: '', new: {}, answered: 0 },
+  grammar: {},
 };
 let state = loadState();
 
@@ -91,6 +114,7 @@ function loadState() {
         settings: { ...base.settings, ...(s.settings || {}) },
         streak: { ...base.streak, ...(s.streak || {}) },
         daily: { ...base.daily, ...(s.daily || {}) },
+        grammar: s.grammar || {},
       };
     }
   } catch (e) { console.warn('Could not read saved progress', e); }
@@ -127,9 +151,10 @@ const MAX_BOX = INTERVALS.length - 1;
 const DECKS = {
   hira: { name: 'Hiragana', jp: 'ひらがな', items: () => KANA.filter((k) => k.script === 'h') },
   kata: { name: 'Katakana', jp: 'カタカナ', items: () => KANA.filter((k) => k.script === 'k') },
+  kanji: { name: 'Kanji', jp: '漢字', items: () => KANJI_ITEMS },
   vocab: { name: 'Words & phrases', jp: 'ことば', items: () => VOCAB_ITEMS },
 };
-const deckOf = (it) => (it.type === 'vocab' ? 'vocab' : it.script === 'h' ? 'hira' : 'kata');
+const deckOf = (it) => (it.type === 'vocab' ? 'vocab' : it.type === 'kanji' ? 'kanji' : it.script === 'h' ? 'hira' : 'kata');
 const rec = (id) => state.srs[id];
 
 function nextBox(r, g) {
@@ -165,6 +190,7 @@ function grade(id, g) {
 }
 // Quiz answers adjust stats; a miss pulls a well-known card back for review.
 function quizResult(id, ok) {
+  if (!ITEMS.has(id)) { markActivity(); save(); return; }
   const r = state.srs[id] || { b: 0, due: 0, c: 0, w: 0 };
   if (ok) r.c++; else {
     r.w++;
@@ -255,15 +281,20 @@ const say = (it, slow = false) => Speech.speak(speakText(it), slow ? 0.6 : 1);
 const app = () => $('#app');
 let cleanup = null;
 const VIEWS = {};
+// Views that live under another tab in the bottom bar.
+const TAB_OF = { settings: 'home', review: 'practice', quiz: 'practice', speak: 'practice', lesson: 'grammar' };
 function go(view, params = {}) {
   if (cleanup) { try { cleanup(); } catch (e) { console.warn(e); } cleanup = null; }
   closeSheet();
   if (Speech.supported) speechSynthesis.cancel();
   const v = VIEWS[view] ? view : 'home';
-  $$('.tabbar button').forEach((b) => b.setAttribute('aria-current', b.dataset.view === v || (v === 'settings' && b.dataset.view === 'home') ? 'page' : 'false'));
-  app().scrollTop = 0;
+  const tab = TAB_OF[v] || v;
+  $$('.tabbar button').forEach((b) => b.setAttribute('aria-current', b.dataset.view === tab ? 'page' : 'false'));
+  const el = app();
+  el.onclick = el.onchange = el.oninput = el.onsubmit = null;
+  el.scrollTop = 0;
   window.scrollTo(0, 0);
-  VIEWS[v](app(), params);
+  VIEWS[v](el, params);
   const h = app().querySelector('h1');
   if (h) { h.setAttribute('tabindex', '-1'); h.focus({ preventScroll: true }); }
 }
@@ -304,11 +335,23 @@ VIEWS.home = (el) => {
         <button class="btn" data-act="quiz" data-mode="k2r" data-script="k">ア → a<br><small>Katakana reading</small></button>
         <button class="btn" data-act="quiz" data-mode="a2k" data-script="b">🔊 → あ<br><small>Listening</small></button>
         <button class="btn" data-act="quiz" data-mode="v2e">${jp('ことば')} → word<br><small>Vocabulary</small></button>
+        <button class="btn" data-act="quiz" data-mode="j2m">${jp('日')} → day<br><small>Kanji meaning</small></button>
+        <button class="btn" data-act="quiz" data-mode="jw2r">${jp('電車')} → ${jp('でんしゃ')}<br><small>Kanji reading</small></button>
       </div>
     </section>
+    ${(() => {
+      const next = GRAMMAR.find((g) => !state.grammar[g.id]?.passed);
+      const doneN = GRAMMAR.filter((g) => state.grammar[g.id]?.passed).length;
+      return `<section class="card">
+        <h2>Grammar <span class="muted small">${doneN} / ${GRAMMAR.length} lessons</span></h2>
+        <div class="bar" aria-hidden="true"><span style="width:${(doneN / GRAMMAR.length) * 100}%"></span></div>
+        ${next ? `<button class="btn wide next-lesson" data-act="lesson" data-id="${esc(next.id)}">Next: ${esc(next.title)} ${jp(next.jp)}</button>`
+          : '<p>All lessons passed. Revisit any time from the Grammar tab.</p>'}
+      </section>`;
+    })()}
     <section class="card">
       <h2>Needs work</h2>
-      ${weak.length ? `<div class="chips">${weak.map((it) => `<button class="chip" data-act="item" data-id="${esc(it.id)}">${jp(it.type === 'kana' ? it.char : it.kana)}</button>`).join('')}</div>`
+      ${weak.length ? `<div class="chips">${weak.map((it) => `<button class="chip" data-act="item" data-id="${esc(it.id)}">${jp(label(it))}</button>`).join('')}</div>`
         : '<p class="muted">Nothing yet. Missed items from reviews and quizzes show up here.</p>'}
     </section>`;
   el.onclick = (e) => {
@@ -317,9 +360,30 @@ VIEWS.home = (el) => {
     const a = b.dataset.act;
     if (a === 'settings') go('settings');
     else if (a === 'review') go('review', { deck: b.dataset.deck });
-    else if (a === 'quiz') go('quiz', { autostart: { mode: b.dataset.mode, script: b.dataset.script || 'h', groups: ['basic'], cat: 'all', len: 15 } });
+    else if (a === 'quiz') go('quiz', { autostart: { mode: b.dataset.mode, script: b.dataset.script || 'h', groups: ['basic'], cat: 'all', kgroup: 'all', len: 15 } });
     else if (a === 'item') openItem(ITEMS.get(b.dataset.id));
+    else if (a === 'lesson') go('lesson', { id: b.dataset.id });
   };
+};
+
+// ---------------------------------------------------------------- practice hub
+VIEWS.practice = (el) => {
+  const due = Object.keys(DECKS).reduce((n, k) => n + deckCounts(k).due, 0);
+  el.innerHTML = `
+    <header class="top"><h1>Practice</h1></header>
+    <button class="card hub" data-go="review">
+      <span class="hub-icon" aria-hidden="true">🃏</span>
+      <span><strong>Review flashcards</strong><br><span class="muted small">Spaced repetition · ${due} due now</span></span>
+    </button>
+    <button class="card hub" data-go="quiz">
+      <span class="hub-icon" aria-hidden="true">✅</span>
+      <span><strong>Quiz</strong><br><span class="muted small">Kana, kanji and word quizzes</span></span>
+    </button>
+    <button class="card hub" data-go="speak">
+      <span class="hub-icon" aria-hidden="true">🎤</span>
+      <span><strong>Speaking practice</strong><br><span class="muted small">Listen, record, compare</span></span>
+    </button>`;
+  el.onclick = (e) => { const b = e.target.closest('[data-go]'); if (b) go(b.dataset.go); };
 };
 
 // ---------------------------------------------------------------- kana chart
@@ -362,6 +426,185 @@ VIEWS.kana = (el) => {
   };
   el.onchange = (e) => {
     if (e.target.id === 'romajiToggle') { state.settings.showRomaji = e.target.checked; save(); render(); }
+  };
+};
+
+// ---------------------------------------------------------------- kanji
+VIEWS.kanji = (el) => {
+  const learned = KANJI_ITEMS.filter((k) => (rec(k.id)?.b || 0) >= 4).length;
+  el.innerHTML = `
+    <header class="top"><h1>Kanji <span lang="ja" class="sub">漢字</span></h1></header>
+    <p class="muted small">${KANJI_ITEMS.length} beginner (JLPT N5) kanji · ${learned} learned. Tap one for readings, example words and stroke order.</p>
+    <div class="row-btns">
+      <button class="btn primary" data-a="review">🃏 Review kanji</button>
+      <button class="btn" data-a="quiz">✅ Quiz</button>
+    </div>
+    <details class="card explainer">
+      <summary>How kanji readings work</summary>
+      <p class="small">Most kanji have two kinds of readings:</p>
+      <ul class="small">
+        <li><strong>On'yomi</strong> (音読み, shown in katakana) come from Chinese. They are mostly used in words made of two or more kanji: 電車 = でんしゃ.</li>
+        <li><strong>Kun'yomi</strong> (訓読み, shown in hiragana) are native Japanese. They are used when a kanji stands alone or has kana after it: 車 = くるま, 食べる = たべる.</li>
+      </ul>
+      <p class="small">Kana in parentheses, like た(べる), is <em>okurigana</em>: the part written in hiragana after the kanji.</p>
+    </details>
+    ${Object.keys(KANJI).map((g) => `<section class="card"><h2>${esc(g)}</h2>
+      <div class="kgrid cols5">${KANJI_ITEMS.filter((k) => k.group === g).map((k) => `
+        <button class="kcell ${mastery(k.id)}" data-id="${esc(k.id)}" aria-label="${esc(k.char)}: ${esc(k.meaning)}">
+          <span lang="ja" class="kc">${esc(k.char)}</span><span class="kr">${esc(k.meaning.split(/[,;]/)[0])}</span></button>`).join('')}
+      </div></section>`).join('')}`;
+  el.onclick = (e) => {
+    const c = e.target.closest('.kcell[data-id]');
+    if (c) return openItem(ITEMS.get(c.dataset.id));
+    const a = e.target.closest('[data-a]');
+    if (a?.dataset.a === 'review') go('review', { deck: 'kanji' });
+    if (a?.dataset.a === 'quiz') go('quiz', { autostart: { mode: 'j2m', kgroup: 'all', len: 15 } });
+  };
+};
+
+function readingChips(list, cls) {
+  return list.length ? list.map((r) => `<button class="chip reading ${cls}" data-say="${esc(r.replace(/[()]/g, ''))}">${jp(r)}</button>`).join('') : '<span class="muted">—</span>';
+}
+
+function openKanji(k) {
+  const r = rec(k.id);
+  const related = VOCAB_ITEMS.filter((v) => v.written.includes(k.char) && !k.ex.some((e) => e.written === v.written)).slice(0, 4);
+  openSheet(`
+    <div class="detail-head">
+      <div class="big" lang="ja">${esc(k.char)}</div>
+      <div>
+        <div class="romaji">${esc(k.meaning)}</div>
+        <div class="muted">Kanji · ${esc(k.group)} · ${window.STROKES?.[k.char]?.s.length || '?'} strokes</div>
+        ${r ? `<div class="muted small">Correct ${r.c} · Missed ${r.w}</div>` : ''}
+      </div>
+    </div>
+    <div class="readings">
+      <div><span class="rlabel">On'yomi</span> ${readingChips(k.on, 'on')}</div>
+      <div><span class="rlabel">Kun'yomi</span> ${readingChips(k.kun, 'kun')}</div>
+    </div>
+    <h3>Example words</h3>
+    <ul class="list">${[...k.ex.map((e, i) => getItem(`jx:${k.char}:${i}`)), ...related].map(wordRow).join('')}</ul>
+    <h3>Stroke order</h3>
+    <div class="stroke-row" data-anim>${strokeSvg(k.char)}</div>
+    <div class="row-btns"><button class="btn" data-replay>↻ Replay strokes</button></div>
+    <h3>Practice writing</h3>
+    <div class="trace-row"><div class="trace-wrap">${strokeSvg(k.char, { ghost: true })}<canvas aria-label="Writing pad for ${esc(k.char)}"></canvas></div></div>
+    <div class="row-btns">
+      <button class="btn" data-clear>Clear</button>
+      <label class="switch"><input type="checkbox" data-guide checked> Show guide</label>
+    </div>`, (bd) => {
+    let stop = animateStrokes($('[data-anim]', bd));
+    const pad = setupTrace($('.trace-wrap', bd));
+    bd._cleanup = () => stop();
+    bd.addEventListener('click', (e) => {
+      const s = e.target.closest('[data-say]');
+      if (s) return Speech.speak(s.dataset.say, 0.8);
+      if (e.target.closest('[data-replay]')) { stop(); stop = animateStrokes($('[data-anim]', bd)); return; }
+      if (e.target.closest('[data-clear]')) return pad.clear();
+      handleWordRowClick(e);
+    });
+    bd.addEventListener('change', (e) => {
+      if (e.target.matches('[data-guide]')) $$('.trace-wrap svg', bd).forEach((s) => s.classList.toggle('hidden', !e.target.checked));
+    });
+  });
+}
+
+// ---------------------------------------------------------------- grammar
+VIEWS.grammar = (el) => {
+  el.innerHTML = `
+    <header class="top"><h1>Grammar <span lang="ja" class="sub">ぶんぽう</span></h1></header>
+    <p class="muted small">Short lessons in order. Each one ends with a quick check; pass it to mark the lesson done.</p>
+    <ol class="lesson-list">${GRAMMAR.map((g, i) => {
+      const s = state.grammar[g.id];
+      return `<li><button class="card lesson-row" data-id="${esc(g.id)}">
+        <span class="lesson-n ${s?.passed ? 'done' : ''}" aria-hidden="true">${s?.passed ? '✓' : i + 1}</span>
+        <span class="lesson-txt"><strong>${esc(g.title)}</strong><br>${jp(g.jp, 'muted')}</span>
+        ${s ? `<span class="muted small">${s.best}/${s.total}</span>` : ''}
+      </button></li>`;
+    }).join('')}</ol>`;
+  el.onclick = (e) => { const b = e.target.closest('[data-id]'); if (b) go('lesson', { id: b.dataset.id }); };
+};
+
+VIEWS.lesson = (el, { id } = {}) => {
+  const idx = Math.max(0, GRAMMAR.findIndex((g) => g.id === id));
+  const g = GRAMMAR[idx];
+  const sentences = g.examples.map((_, i) => getItem(`gx:${g.id}:${i}`));
+  const checks = g.check.map((c) => ({ ...c, answer: c.opts[0], shown: shuffle(c.opts.slice()) }));
+  const answers = new Array(checks.length).fill(null);
+  el.innerHTML = `
+    <header class="top"><button class="icon-btn" data-a="back" aria-label="All lessons">←</button>
+      <h1>${esc(g.title)}</h1><span class="muted small">${idx + 1}/${GRAMMAR.length}</span></header>
+    <div class="lesson-jp" lang="ja">${esc(g.jp)}</div>
+    <section class="card">
+      <ul class="points">${g.points.map((p) => `<li>${esc(p)}</li>`).join('')}</ul>
+      <div class="pattern"><span class="rlabel">Pattern</span><span lang="ja">${esc(g.pattern)}</span></div>
+    </section>
+    <section class="card">
+      <h2>Examples</h2>
+      <p class="muted small">Tap a sentence for details, or 🔊 to hear it.</p>
+      <ul class="list">${sentences.map(wordRow).join('')}</ul>
+      <div class="row-btns"><button class="btn" data-a="playall">▶ Play all</button>
+        <button class="btn" data-a="speak">🎤 Practice saying these</button></div>
+    </section>
+    <section class="card">
+      <h2>Check yourself</h2>
+      ${checks.map((c, qi) => `<div class="check-q" data-q="${qi}">
+        <p class="q"><span lang="ja">${esc(c.q)}</span></p>
+        <div class="options small-opts">${c.shown.map((o) => `<button class="btn opt" data-q="${qi}" data-o="${esc(o)}"><span lang="ja">${esc(o)}</span></button>`).join('')}</div>
+        <div class="why" aria-live="polite"></div>
+      </div>`).join('')}
+      <div class="feedback" id="lessonResult" aria-live="polite"></div>
+    </section>
+    <div class="row-btns center">
+      ${idx > 0 ? `<button class="btn" data-a="prev">← ${esc(GRAMMAR[idx - 1].title)}</button>` : ''}
+      ${idx < GRAMMAR.length - 1 ? `<button class="btn primary" data-a="next">${esc(GRAMMAR[idx + 1].title)} →</button>` : ''}
+    </div>`;
+  let playing = false;
+  cleanup = () => { playing = false; };
+  el.onclick = async (e) => {
+    const o = e.target.closest('.opt[data-q]');
+    if (o) {
+      const qi = Number(o.dataset.q);
+      if (answers[qi] !== null) return;
+      const c = checks[qi];
+      const ok = o.dataset.o === c.answer;
+      answers[qi] = ok;
+      const box = $(`.check-q[data-q="${qi}"]`, el);
+      $$('.opt', box).forEach((b) => { b.disabled = true; if (b.dataset.o === c.answer) b.classList.add('correct'); });
+      if (!ok) o.classList.add('wrong');
+      $('.why', box).innerHTML = `<p class="${ok ? 'ok' : 'no'} small">${ok ? '✓' : '✗'} ${esc(c.why)}</p>`;
+      if (answers.every((a) => a !== null)) {
+        const score = answers.filter(Boolean).length;
+        const passed = score >= Math.ceil(checks.length * 0.67);
+        const prev = state.grammar[g.id];
+        state.grammar[g.id] = { best: Math.max(score, prev?.best || 0), total: checks.length, passed: passed || !!prev?.passed };
+        markActivity(); save();
+        $('#lessonResult', el).innerHTML = passed
+          ? `<div class="ok">✓ ${score}/${checks.length}. Lesson passed!</div>`
+          : `<div class="no">${score}/${checks.length}. Review the points above and try again.</div><button class="btn" data-a="retry">↻ Try again</button>`;
+      }
+      return;
+    }
+    if (handleWordRowClick(e)) return;
+    const b = e.target.closest('[data-a]');
+    if (!b) return;
+    switch (b.dataset.a) {
+      case 'back': go('grammar'); break;
+      case 'prev': go('lesson', { id: GRAMMAR[idx - 1].id }); break;
+      case 'next': go('lesson', { id: GRAMMAR[idx + 1].id }); break;
+      case 'retry': go('lesson', { id: g.id }); break;
+      case 'speak': go('speak', { source: 'Grammar sentences', id: sentences[0].id }); break;
+      case 'playall':
+        if (playing) { playing = false; window.speechSynthesis?.cancel(); b.textContent = '▶ Play all'; break; }
+        playing = true; b.textContent = '⏹ Stop';
+        for (const s of sentences) {
+          if (!playing) break;
+          await say(s);
+          await new Promise((r) => setTimeout(r, 500));
+        }
+        playing = false; b.textContent = '▶ Play all';
+        break;
+    }
   };
 };
 
@@ -461,6 +704,7 @@ function setupTrace(wrap) {
 function openItem(it) {
   if (!it) return;
   if (it.type === 'vocab') return openWord(it);
+  if (it.type === 'kanji') return openKanji(it);
   const chars = [...it.char];
   const other = ITEMS.get(`${it.script === 'h' ? 'k' : 'h'}:${it.script === 'h' ? toKata(it.char) : it.hira}`);
   const tip = kanaTip(it);
@@ -526,11 +770,15 @@ function openWord(v) {
       <button class="btn" data-slow>🐢 Slow</button>
       <button class="btn" data-speak>🎤 Practice saying it</button>
     </div>
-    <h3>Characters</h3>
+    ${(() => {
+      const ks = [...new Set([...v.written])].map((c) => ITEMS.get(`j:${c}`)).filter(Boolean);
+      return ks.length ? `<h3>Kanji</h3><div class="chips">${ks.map((k) => `<button class="chip" data-kana="${esc(k.id)}">${jp(k.char)} <small>${esc(k.meaning)}</small></button>`).join('')}</div>` : '';
+    })()}
+    ${[...v.kana].length <= 12 ? `<h3>Characters</h3>
     <div class="chips">${[...v.kana].map((c) => {
       const k = KANA.find((x) => x.char === c);
       return k ? `<button class="chip" data-kana="${esc(k.id)}">${jp(c)} <small>${esc(k.romaji)}</small></button>` : `<span class="chip">${jp(c)}</span>`;
-    }).join('')}</div>`, (bd) => {
+    }).join('')}</div>` : ''}`, (bd) => {
     say(v);
     bd.addEventListener('click', (e) => {
       if (e.target.closest('[data-play]')) say(v);
@@ -579,24 +827,28 @@ VIEWS.review = (el, { deck } = {}) => {
     const it = ITEMS.get(queue[0]);
     const r = rec(it.id);
     const isNew = !r || !r.b;
-    const front = it.type === 'kana'
+    const front = it.type === 'kana' || it.type === 'kanji'
       ? `<div class="flash-char" lang="ja">${esc(it.char)}</div>`
       : `<div class="flash-word" lang="ja">${esc(it.kana)}</div>${it.written !== it.kana ? `<div class="muted" lang="ja">${esc(it.written)}</div>` : ''}`;
+    const back = it.type === 'kanji'
+      ? `<div class="romaji">${esc(it.meaning)}</div>
+         <div class="readings center"><div><span class="rlabel">On</span> ${it.on.length ? it.on.map((x) => jp(x)).join('、') : '—'}</div>
+           <div><span class="rlabel">Kun</span> ${it.kun.length ? it.kun.map((x) => jp(x)).join('、') : '—'}</div></div>
+         <div class="muted">${jp(it.ex[0].written)} ${jp(it.ex[0].kana)} = ${esc(it.ex[0].en)}</div>`
+      : `<div class="romaji">${esc(it.romaji)}</div>
+         ${it.type === 'vocab' ? `<div class="en">${esc(it.en)}</div>` : ''}
+         ${it.type === 'kana' && kanaTip(it) ? `<p class="tip small">💡 ${esc(kanaTip(it))}</p>` : ''}`;
     el.innerHTML = `
       <header class="top"><h1>${esc(DECKS[deck].name)}</h1><button class="icon-btn" data-a="quit" aria-label="End session">✕</button></header>
       <div class="progress" aria-label="${done} of ${total} done"><span style="width:${total ? (done / total) * 100 : 0}%"></span></div>
       <div class="muted small center">${queue.length} left${isNew ? ' · <span class="badge">new</span>' : ''}</div>
       <section class="card flash" data-a="reveal" aria-live="polite">
         ${front}
-        <div class="answer" hidden>
-          <div class="romaji">${esc(it.romaji)}</div>
-          ${it.type === 'vocab' ? `<div class="en">${esc(it.en)}</div>` : ''}
-          ${it.type === 'kana' && kanaTip(it) ? `<p class="tip small">💡 ${esc(kanaTip(it))}</p>` : ''}
-        </div>
+        <div class="answer" hidden>${back}</div>
         <div class="row-btns center">
-          <button class="btn" data-a="play">🔊</button>
-          <button class="btn" data-a="slow">🐢</button>
-          ${it.type === 'kana' ? '<button class="btn" data-a="detail">✍️ Strokes</button>' : ''}
+          <button class="btn" data-a="play" aria-label="Play">🔊</button>
+          <button class="btn" data-a="slow" aria-label="Play slowly">🐢</button>
+          ${it.type !== 'vocab' ? '<button class="btn" data-a="detail">✍️ Details</button>' : ''}
         </div>
       </section>
       <div class="controls">
@@ -663,8 +915,11 @@ const QUIZ_MODES = {
   v2e: { name: 'Words: Japanese → English', kind: 'vocab' },
   e2v: { name: 'Words: English → Japanese', kind: 'vocab' },
   a2e: { name: 'Words: listen → English', kind: 'vocab' },
+  j2m: { name: 'Kanji: kanji → meaning', kind: 'kanji' },
+  m2j: { name: 'Kanji: meaning → kanji', kind: 'kanji' },
+  jw2r: { name: 'Kanji: word → reading', kind: 'kanji' },
 };
-let quizPrefs = { mode: 'k2r', script: 'h', groups: ['basic'], cat: 'all', len: 15 };
+let quizPrefs = { mode: 'k2r', script: 'h', groups: ['basic'], cat: 'all', kgroup: 'all', len: 15 };
 const LENS = [10, 15, 25, 40];
 
 VIEWS.quiz = (el, { autostart } = {}) => {
@@ -686,6 +941,9 @@ VIEWS.quiz = (el, { autostart } = {}) => {
       <fieldset class="vocab-opts"><legend>Topic</legend>
         <select name="cat" aria-label="Topic"><option value="all">All topics</option>${cats.map((c) => `<option ${p.cat === c ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>
       </fieldset>
+      <fieldset class="kanji-opts"><legend>Kanji group</legend>
+        <select name="kgroup" aria-label="Kanji group"><option value="all">All kanji</option>${Object.keys(KANJI).map((c) => `<option ${p.kgroup === c ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>
+      </fieldset>
       <fieldset><legend>Questions</legend>
         <div class="seg small">${[10, 15, 25, 40].map((n) => `<label><input type="radio" name="len" value="${n}" ${(LENS.includes(p.len) ? p.len : 15) === n ? 'checked' : ''}><span>${n}</span></label>`).join('')}</div>
       </fieldset>
@@ -696,19 +954,27 @@ VIEWS.quiz = (el, { autostart } = {}) => {
     const kind = QUIZ_MODES[form.mode.value].kind;
     $('.kana-opts', el).hidden = kind !== 'kana';
     $('.vocab-opts', el).hidden = kind !== 'vocab';
+    $('.kanji-opts', el).hidden = kind !== 'kanji';
   };
   form.addEventListener('change', sync);
   sync();
   form.addEventListener('submit', (e) => {
     e.preventDefault();
     const groups = $$('input[name="groups"]:checked', form).map((x) => x.value);
-    quizPrefs = { mode: form.mode.value, script: form.script.value, groups: groups.length ? groups : ['basic'], cat: form.cat.value, len: Number(form.len.value) || 15 };
+    quizPrefs = { mode: form.mode.value, script: form.script.value, groups: groups.length ? groups : ['basic'], cat: form.cat.value, kgroup: form.kgroup.value, len: Number(form.len.value) || 15 };
     runQuiz(el, quizPrefs);
   });
 };
 
 function quizPool(p) {
-  if (QUIZ_MODES[p.mode].kind === 'vocab') return p.cat === 'all' ? VOCAB_ITEMS : VOCAB_ITEMS.filter((v) => v.cat === p.cat);
+  const kind = QUIZ_MODES[p.mode].kind;
+  if (kind === 'vocab') return p.cat === 'all' ? VOCAB_ITEMS : VOCAB_ITEMS.filter((v) => v.cat === p.cat);
+  if (kind === 'kanji') {
+    const g = p.kgroup || 'all';
+    const pool = g === 'all' ? KANJI_ITEMS : KANJI_ITEMS.filter((k) => k.group === g);
+    // Small groups borrow from everything so there are enough answer choices.
+    return pool.length >= 4 ? pool : KANJI_ITEMS;
+  }
   return KANA.filter((k) => (p.script === 'b' || k.script === p.script) && p.groups.includes(k.group));
 }
 // Weighted pick: missed and unseen items come up more often.
@@ -748,9 +1014,17 @@ function runQuiz(el, p, fixedItems = null) {
     if (mode === 'k2r') return esc(x.romaji);
     if (mode === 'r2k' || mode === 'a2k') return jp(x.char, 'opt-jp');
     if (mode === 'e2v') return jp(x.kana, 'opt-jp-sm');
+    if (mode === 'j2m') return esc(x.meaning);
+    if (mode === 'm2j') return jp(x.char, 'opt-jp');
+    if (mode === 'jw2r') return jp(x.ex[0].kana, 'opt-jp-sm');
     return esc(x.en);
   };
-  const keyFn = (x) => (mode === 'k2r' || mode === 'a2k' || mode === 'r2k' ? x.romaji : x.en);
+  const keyFn = (x) => {
+    if (mode === 'k2r' || mode === 'a2k' || mode === 'r2k' || mode === 'type') return x.romaji;
+    if (mode === 'j2m' || mode === 'm2j') return x.meaning;
+    if (mode === 'jw2r') return x.ex[0].kana;
+    return x.en;
+  };
 
   const finish = () => {
     const pct = Math.round((score / qs.length) * 100);
@@ -761,9 +1035,9 @@ function runQuiz(el, p, fixedItems = null) {
       </section>
       ${missed.length ? `<section class="card"><h2>Missed</h2><ul class="list">${[...new Set(missed)].map((id) => {
         const it = ITEMS.get(id);
-        return it.type === 'kana'
-          ? `<li><button class="row" data-id="${esc(id)}">${jp(it.char, 'row-jp')}<span class="row-main">${esc(it.romaji)}</span><span aria-hidden="true">🔊</span></button></li>`
-          : wordRow(it);
+        if (it.type === 'kana') return `<li><button class="row" data-id="${esc(id)}">${jp(it.char, 'row-jp')}<span class="row-main">${esc(it.romaji)}</span><span aria-hidden="true">🔊</span></button></li>`;
+        if (it.type === 'kanji') return `<li><button class="row" data-id="${esc(id)}">${jp(it.char, 'row-jp')}<span class="row-main"><span class="row-romaji">${esc(it.meaning)}</span><span class="row-en">${jp(it.ex[0].written)} ${jp(it.ex[0].kana)}</span></span><span aria-hidden="true">🔊</span></button></li>`;
+        return wordRow(it);
       }).join('')}</ul></section>` : ''}
       <div class="row-btns center">
         ${missed.length ? '<button class="btn primary" data-a="retry">Retry missed</button>' : ''}
@@ -772,7 +1046,7 @@ function runQuiz(el, p, fixedItems = null) {
       </div>`;
     el.onclick = (e) => {
       const r = e.target.closest('[data-id]');
-      if (r) { const it = ITEMS.get(r.dataset.id); say(it); if (it.type === 'kana') openItem(it); return; }
+      if (r) { const it = ITEMS.get(r.dataset.id); say(it); if (it.type !== 'vocab') openItem(it); return; }
       if (handleWordRowClick(e)) return;
       const b = e.target.closest('[data-a]');
       if (!b) return;
@@ -787,7 +1061,9 @@ function runQuiz(el, p, fixedItems = null) {
     locked = false;
     const it = qs[i];
     let prompt;
-    if (mode === 'k2r' || mode === 'type') prompt = `<div class="flash-char" lang="ja">${esc(it.char)}</div>`;
+    if (mode === 'k2r' || mode === 'type' || mode === 'j2m') prompt = `<div class="flash-char" lang="ja">${esc(it.char)}</div>`;
+    else if (mode === 'm2j') prompt = `<div class="flash-en">${esc(it.meaning)}</div>`;
+    else if (mode === 'jw2r') prompt = `<div class="flash-word" lang="ja">${esc(it.ex[0].written)}</div><div class="muted">${esc(it.ex[0].en)}</div>`;
     else if (mode === 'r2k') prompt = `<div class="flash-romaji">${esc(it.romaji)}</div>`;
     else if (mode === 'a2k' || mode === 'a2e') prompt = `<button class="btn big-play" data-a="play" aria-label="Play sound">🔊</button><div class="muted small">Tap to hear it again</div>`;
     else if (mode === 'v2e') prompt = `<div class="flash-word" lang="ja">${esc(it.kana)}</div>${it.written !== it.kana ? `<div class="muted" lang="ja">${esc(it.written)}</div>` : ''}`;
@@ -800,7 +1076,7 @@ function runQuiz(el, p, fixedItems = null) {
         <button class="btn primary" type="submit">Check</button></form>`;
     } else {
       const opts = shuffle([it, ...distractors(it, pool, keyFn)]);
-      answers = `<div class="options ${mode === 'r2k' || mode === 'a2k' ? 'jp-opts' : ''}">${opts.map((o) => `<button class="btn opt" data-id="${esc(o.id)}">${optLabel(o)}</button>`).join('')}</div>`;
+      answers = `<div class="options ${mode === 'r2k' || mode === 'a2k' || mode === 'm2j' ? 'jp-opts' : ''}">${opts.map((o) => `<button class="btn opt" data-id="${esc(o.id)}">${optLabel(o)}</button>`).join('')}</div>`;
     }
     el.innerHTML = `
       <header class="top"><h1>${esc(QUIZ_MODES[mode].name)}</h1><button class="icon-btn" data-a="quit" aria-label="End quiz">✕</button></header>
@@ -822,7 +1098,9 @@ function runQuiz(el, p, fixedItems = null) {
       $$('.opt', el).forEach((b) => { b.disabled = true; if (b.dataset.id === it.id) b.classList.add('correct'); });
       if (!ok && chosenEl) chosenEl.classList.add('wrong');
     }
-    const ans = it.type === 'kana' ? `${jp(it.char)} = ${esc(it.romaji)}` : `${jp(it.kana)} (${esc(it.romaji)}) = ${esc(it.en)}`;
+    const ans = it.type === 'kana' ? `${jp(it.char)} = ${esc(it.romaji)}`
+      : it.type === 'kanji' ? `${jp(it.char)} = ${esc(it.meaning)} · ${jp(it.ex[0].written)} ${jp(it.ex[0].kana)} (${esc(it.ex[0].romaji)})`
+        : `${jp(it.kana)} (${esc(it.romaji)}) = ${esc(it.en)}`;
     fb.innerHTML = ok ? `<div class="ok">✓ Correct · ${ans}</div>` : `<div class="no">✗ ${ans}</div><button class="btn primary wide" data-a="next">Next</button>`;
     say(it);
     if (ok) setTimeout(() => { if (locked && qs[i] === it) { i++; show(); } }, 1100);
@@ -857,7 +1135,7 @@ function runQuiz(el, p, fixedItems = null) {
 // ---------------------------------------------------------------- words
 let wordsCat = 'Greetings';
 function wordRow(v) {
-  return `<li class="wrow">
+  return `<li class="wrow ${[...v.kana].length > 9 ? 'long' : ''}">
     <button class="row" data-word="${esc(v.id)}">
       <span class="row-jpbox">${v.written !== v.kana ? `<span lang="ja" class="row-written">${esc(v.written)}</span>` : ''}<span lang="ja" class="row-jp">${esc(v.kana)}</span></span>
       <span class="row-main"><span class="row-romaji">${esc(v.romaji)}</span><span class="row-en">${esc(v.en)}</span></span>
@@ -868,11 +1146,11 @@ function wordRow(v) {
 }
 function handleWordRowClick(e) {
   const p = e.target.closest('[data-wplay]');
-  if (p) { say(ITEMS.get(p.dataset.wplay)); return true; }
+  if (p) { say(getItem(p.dataset.wplay)); return true; }
   const s = e.target.closest('[data-wslow]');
-  if (s) { say(ITEMS.get(s.dataset.wslow), true); return true; }
+  if (s) { say(getItem(s.dataset.wslow), true); return true; }
   const w = e.target.closest('[data-word]');
-  if (w) { openWord(ITEMS.get(w.dataset.word)); return true; }
+  if (w) { openWord(getItem(w.dataset.word)); return true; }
   return false;
 }
 VIEWS.words = (el) => {
@@ -887,7 +1165,7 @@ VIEWS.words = (el) => {
   el.innerHTML = `
     <header class="top"><h1>Words & phrases</h1></header>
     <input type="search" id="wordSearch" class="search" placeholder="Search English, romaji or kana" aria-label="Search words">
-    <div class="chips scroll" id="cats">${Object.keys(VOCAB).map((c) => `<button class="chip ${c === wordsCat ? 'on' : ''}" data-cat="${esc(c)}">${esc(c)}</button>`).join('')}</div>
+    <select id="cats" class="select" aria-label="Topic">${Object.keys(VOCAB).map((c) => `<option value="${esc(c)}" ${c === wordsCat ? 'selected' : ''}>${esc(c)} (${VOCAB[c].length})</option>`).join('')}</select>
     <ul class="list card" id="wordList"></ul>
     <div class="row-btns center">
       <button class="btn" data-a="quiz">Quiz this topic</button>
@@ -895,13 +1173,10 @@ VIEWS.words = (el) => {
     </div>`;
   renderList();
   el.oninput = (e) => { if (e.target.id === 'wordSearch') { query = e.target.value; renderList(); } };
+  el.onchange = (e) => {
+    if (e.target.id === 'cats') { wordsCat = e.target.value; query = ''; $('#wordSearch', el).value = ''; renderList(); }
+  };
   el.onclick = (e) => {
-    const c = e.target.closest('[data-cat]');
-    if (c) {
-      wordsCat = c.dataset.cat; query = ''; $('#wordSearch', el).value = '';
-      $$('#cats .chip', el).forEach((x) => x.classList.toggle('on', x === c));
-      return renderList();
-    }
     if (handleWordRowClick(e)) return;
     const a = e.target.closest('[data-a]');
     if (a?.dataset.a === 'quiz') go('quiz', { autostart: { mode: 'v2e', cat: wordsCat, len: 10 } });
@@ -914,8 +1189,13 @@ const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 let speakSource = 'Greetings';
 VIEWS.speak = (el, { source, id } = {}) => {
   if (source) speakSource = source;
-  const sources = ['Hiragana', 'Katakana', ...Object.keys(VOCAB)];
-  const listFor = (s) => (s === 'Hiragana' ? KANA.filter((k) => k.script === 'h') : s === 'Katakana' ? KANA.filter((k) => k.script === 'k') : VOCAB_ITEMS.filter((v) => v.cat === s));
+  const sources = ['Hiragana', 'Katakana', 'Grammar sentences', 'Kanji words', ...Object.keys(VOCAB)];
+  const listFor = (s) => (s === 'Hiragana' ? KANA.filter((k) => k.script === 'h')
+    : s === 'Katakana' ? KANA.filter((k) => k.script === 'k')
+      : s === 'Grammar sentences' ? GRAMMAR_SENTENCES
+        : s === 'Kanji words' ? KANJI_WORDS
+          : VOCAB_ITEMS.filter((v) => v.cat === s));
+  if (!listFor(speakSource).length) speakSource = 'Greetings';
   let list = listFor(speakSource);
   let idx = Math.max(0, id ? list.findIndex((x) => x.id === id) : 0);
   let recorder = null, stream = null, chunks = [], myUrl = null, recognizer = null;
