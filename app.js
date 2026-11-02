@@ -80,7 +80,17 @@ for (const [group, list] of Object.entries(KANJI)) {
 const exampleItem = (e, id, cat) => ({ id, type: 'vocab', cat, kana: e.kana, written: e.written, romaji: e.romaji, en: e.en, pseudo: true });
 const KANJI_WORDS = KANJI_ITEMS.flatMap((k) => k.ex.map((e, i) => exampleItem(e, `jx:${k.char}:${i}`, 'Kanji words')));
 const GRAMMAR_SENTENCES = GRAMMAR.flatMap((g) => g.examples.map(([written, kana, romaji, en], i) => exampleItem({ written, kana, romaji, en }, `gx:${g.id}:${i}`, 'Grammar sentences')));
-const PSEUDO = new Map([...KANJI_WORDS, ...GRAMMAR_SENTENCES].map((x) => [x.id, x]));
+// Drive & Learn content as speakable items.
+const DRIVE = DRIVE_UNITS.map((u, ui) => ({
+  ...u, n: ui + 1,
+  items: u.phrases.map(([en, written, kana, romaji, note, alts], i) => ({
+    id: `d:${u.id}:${i}`, type: 'vocab', pseudo: true, cat: `🚗 ${u.title}`, en, written, kana, romaji, note: note || '', alts: alts || [],
+  })),
+  lines: (u.dialogue?.lines || []).map(([who, en, written, kana, romaji], i) => ({
+    id: `dl:${u.id}:${i}`, type: 'vocab', pseudo: true, cat: `🚗 ${u.title}`, who, en, written, kana, romaji, alts: [],
+  })),
+}));
+const PSEUDO = new Map([...KANJI_WORDS, ...GRAMMAR_SENTENCES, ...DRIVE.flatMap((u) => [...u.items, ...u.lines])].map((x) => [x.id, x]));
 const getItem = (id) => ITEMS.get(id) || PSEUDO.get(id);
 
 const romajiAccepts = (romaji) => [romaji, ...(ROMAJI_ALT[romaji] || [])];
@@ -97,10 +107,14 @@ function examplesFor(it) {
 const STORE_KEY = 'nihongo-dojo-v1';
 const DEFAULT_STATE = {
   srs: {},
-  settings: { voiceURI: '', rate: 0.85, newPerDay: 15, showRomaji: true },
+  settings: {
+    voiceURI: '', rate: 0.85, newPerDay: 15, showRomaji: true,
+    voiceEnURI: '', rateEn: 1, driveCheck: true, driveWarmup: true, driveAuto: true, drivePause: 'normal',
+  },
   streak: { last: '', count: 0 },
   daily: { date: '', new: {}, answered: 0 },
   grammar: {},
+  drive: { next: 0, units: {}, phr: {} },
 };
 let state = loadState();
 
@@ -115,6 +129,7 @@ function loadState() {
         streak: { ...base.streak, ...(s.streak || {}) },
         daily: { ...base.daily, ...(s.daily || {}) },
         grammar: s.grammar || {},
+        drive: { ...base.drive, ...(s.drive || {}) },
       };
     }
   } catch (e) { console.warn('Could not read saved progress', e); }
@@ -247,32 +262,48 @@ const Speech = {
   init() {
     if (!this.supported) return;
     const load = () => {
-      this.voices = speechSynthesis.getVoices().filter((v) => /^ja([-_]|$)/i.test(v.lang));
+      const all = speechSynthesis.getVoices();
+      this.voices = all.filter((v) => /^ja([-_]|$)/i.test(v.lang));
+      this.voicesEn = all.filter((v) => /^en([-_]|$)/i.test(v.lang));
       document.dispatchEvent(new Event('voices-ready'));
     };
     load();
     speechSynthesis.addEventListener?.('voiceschanged', load);
   },
+  voicesEn: [],
   voice() {
     const v = this.voices;
     return v.find((x) => x.voiceURI === state.settings.voiceURI)
       || v.find((x) => /kyoko|o-ren|otoya|hattori/i.test(x.name))
       || v.find((x) => x.localService) || v[0] || null;
   },
-  speak(text, rateMul = 1) {
+  voiceEn() {
+    const v = this.voicesEn;
+    const us = (x) => /^en[-_]US/i.test(x.lang);
+    return v.find((x) => x.voiceURI === state.settings.voiceEnURI)
+      || v.find((x) => us(x) && x.localService && /samantha|ava|allison|evan|nathan|zoe|aria|jenny|guy/i.test(x.name))
+      || v.find((x) => us(x) && x.localService) || v.find(us) || v[0] || null;
+  },
+  // msPerChar is only a safety timeout in case the browser never fires onend.
+  utter(text, lang, voice, rate, msPerChar) {
     if (!this.supported) { toast('Speech is not supported on this device'); return Promise.resolve(); }
     speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(text);
-    u.lang = 'ja-JP';
-    const v = this.voice();
-    if (v) u.voice = v;
-    u.rate = clamp(state.settings.rate * rateMul, 0.3, 1.5);
+    u.lang = lang;
+    if (voice) u.voice = voice;
+    u.rate = rate;
     return new Promise((resolve) => {
       const done = () => { clearTimeout(timer); resolve(); };
-      const timer = setTimeout(done, 1500 + text.length * 600 / u.rate);
+      const timer = setTimeout(done, 2000 + text.length * msPerChar / u.rate);
       u.onend = done; u.onerror = done;
       speechSynthesis.speak(u);
     });
+  },
+  speak(text, rateMul = 1) {
+    return this.utter(text, 'ja-JP', this.voice(), clamp(state.settings.rate * rateMul, 0.3, 1.5), 450);
+  },
+  speakEn(text) {
+    return this.utter(text, 'en-US', this.voiceEn(), clamp(state.settings.rateEn || 1, 0.6, 1.4), 120);
   },
 };
 const say = (it, slow = false) => Speech.speak(speakText(it), slow ? 0.6 : 1);
@@ -282,7 +313,7 @@ const app = () => $('#app');
 let cleanup = null;
 const VIEWS = {};
 // Views that live under another tab in the bottom bar.
-const TAB_OF = { settings: 'home', review: 'practice', quiz: 'practice', speak: 'practice', lesson: 'grammar' };
+const TAB_OF = { settings: 'home', review: 'practice', quiz: 'practice', speak: 'practice', lesson: 'grammar', drive: 'practice' };
 function go(view, params = {}) {
   if (cleanup) { try { cleanup(); } catch (e) { console.warn(e); } cleanup = null; }
   closeSheet();
@@ -328,6 +359,13 @@ VIEWS.home = (el) => {
         </div>`;
       }).join('')}
     </section>
+    ${(() => {
+      const ui = Math.min(state.drive.next, DRIVE.length - 1);
+      return `<button class="card hub drive-hub" data-act="drive">
+        <span class="hub-icon" aria-hidden="true">🚗</span>
+        <span><strong>Drive &amp; Learn</strong><br><span class="muted small">${state.drive.next >= DRIVE.length ? 'All units done · review mix' : `Next: unit ${ui + 1}, ${esc(DRIVE[ui].title)}`}</span></span>
+      </button>`;
+    })()}
     <section class="card">
       <h2>Quick practice</h2>
       <div class="grid2">
@@ -363,6 +401,7 @@ VIEWS.home = (el) => {
     else if (a === 'quiz') go('quiz', { autostart: { mode: b.dataset.mode, script: b.dataset.script || 'h', groups: ['basic'], cat: 'all', kgroup: 'all', len: 15 } });
     else if (a === 'item') openItem(ITEMS.get(b.dataset.id));
     else if (a === 'lesson') go('lesson', { id: b.dataset.id });
+    else if (a === 'drive') go('drive');
   };
 };
 
@@ -371,6 +410,10 @@ VIEWS.practice = (el) => {
   const due = Object.keys(DECKS).reduce((n, k) => n + deckCounts(k).due, 0);
   el.innerHTML = `
     <header class="top"><h1>Practice</h1></header>
+    <button class="card hub drive-hub" data-go="drive">
+      <span class="hub-icon" aria-hidden="true">🚗</span>
+      <span><strong>Drive &amp; Learn</strong><br><span class="muted small">Hands-free spoken lessons · Unit ${Math.min(state.drive.next + 1, DRIVE.length)} of ${DRIVE.length}</span></span>
+    </button>
     <button class="card hub" data-go="review">
       <span class="hub-icon" aria-hidden="true">🃏</span>
       <span><strong>Review flashcards</strong><br><span class="muted small">Spaced repetition · ${due} due now</span></span>
@@ -1189,12 +1232,13 @@ const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 let speakSource = 'Greetings';
 VIEWS.speak = (el, { source, id } = {}) => {
   if (source) speakSource = source;
-  const sources = ['Hiragana', 'Katakana', 'Grammar sentences', 'Kanji words', ...Object.keys(VOCAB)];
+  const sources = ['Hiragana', 'Katakana', 'Grammar sentences', 'Kanji words', ...Object.keys(VOCAB), ...DRIVE.map((u) => `🚗 ${u.title}`)];
   const listFor = (s) => (s === 'Hiragana' ? KANA.filter((k) => k.script === 'h')
     : s === 'Katakana' ? KANA.filter((k) => k.script === 'k')
       : s === 'Grammar sentences' ? GRAMMAR_SENTENCES
         : s === 'Kanji words' ? KANJI_WORDS
-          : VOCAB_ITEMS.filter((v) => v.cat === s));
+          : s.startsWith('🚗 ') ? (DRIVE.find((u) => `🚗 ${u.title}` === s)?.items || [])
+            : VOCAB_ITEMS.filter((v) => v.cat === s));
   if (!listFor(speakSource).length) speakSource = 'Greetings';
   let list = listFor(speakSource);
   let idx = Math.max(0, id ? list.findIndex((x) => x.id === id) : 0);
@@ -1331,6 +1375,595 @@ VIEWS.speak = (el, { source, id } = {}) => {
       case 'prev': idx = Math.max(0, idx - 1); resetRecording(); render(); say(list[idx]); break;
       case 'next': idx = Math.min(list.length - 1, idx + 1); resetRecording(); render(); say(list[idx]); break;
       case 'shuffle': idx = Math.floor(Math.random() * list.length); resetRecording(); render(); say(list[idx]); break;
+    }
+  };
+};
+
+// ---------------------------------------------------------------- drive & learn
+/* Hands-free lesson player. A session is a list of tasks that run one after another.
+   Pause / skip / back / repeat abort the running task through an AbortController;
+   the loop then picks up from D.idx. */
+const ABORT = new Error('drive-abort');
+const getSR = () => window.SpeechRecognition || window.webkitSpeechRecognition;
+const D = { running: false, paused: false, tasks: [], idx: 0, ctl: null, waiter: null, wake: null, check: true, netFails: 0, score: {}, view: {}, ended: false };
+
+const stripParen = (s) => s.replace(/\s*\([^)]*\)/g, '');
+const kanaLen = (p) => [...p.kana.replace(/[、。\s]/g, '')].length;
+const PAUSE_FACTOR = { short: 0.75, normal: 1, long: 1.4 };
+const pauseMs = (p) => clamp((1400 + kanaLen(p) * 320) * (PAUSE_FACTOR[state.settings.drivePause] || 1), 2200, 11000);
+const listenMs = (p) => clamp(4500 + kanaLen(p) * 260, 5500, 13000);
+const unitMinutes = (u) => Math.max(3, Math.round((u.items.length * 42 + u.lines.length * 2 * 11) / 60));
+
+function sleepS(ms, sig) {
+  return new Promise((resolve, reject) => {
+    if (sig.aborted) return reject(ABORT);
+    const t = setTimeout(() => { sig.removeEventListener('abort', onAbort); resolve(); }, ms);
+    const onAbort = () => { clearTimeout(t); reject(ABORT); };
+    sig.addEventListener('abort', onAbort, { once: true });
+  });
+}
+async function speakS(fn, sig) {
+  if (sig.aborted) throw ABORT;
+  const onAbort = () => window.speechSynthesis?.cancel();
+  sig.addEventListener('abort', onAbort, { once: true });
+  try { await fn(); } finally { sig.removeEventListener('abort', onAbort); }
+  if (sig.aborted) throw ABORT;
+}
+const enS = (text, sig) => speakS(() => Speech.speakEn(text), sig);
+const jaS = (text, sig, rateMul = 1) => speakS(() => Speech.speak(text, rateMul), sig);
+// English with {Japanese} segments, e.g. 'Fish is {さかな}.'
+async function mixedS(text, sig) {
+  for (const [i, part] of text.split(/\{([^}]*)\}/).entries()) {
+    if (!part.trim()) continue;
+    if (i % 2) await jaS(part, sig); else await enS(part, sig);
+  }
+}
+
+// Short tones played through an <audio> element (not muted by the iPhone's silent switch).
+const Cue = {
+  el: null, urls: {},
+  tone(notes) {
+    const rate = 22050;
+    const total = notes.reduce((n, [, ms]) => n + Math.round(rate * ms / 1000), 0);
+    const buf = new ArrayBuffer(44 + total * 2);
+    const v = new DataView(buf);
+    const w = (o, s) => [...s].forEach((c, i) => v.setUint8(o + i, c.charCodeAt(0)));
+    w(0, 'RIFF'); v.setUint32(4, 36 + total * 2, true); w(8, 'WAVEfmt '); v.setUint32(16, 16, true);
+    v.setUint16(20, 1, true); v.setUint16(22, 1, true); v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true);
+    v.setUint16(32, 2, true); v.setUint16(34, 16, true); w(36, 'data'); v.setUint32(40, total * 2, true);
+    let o = 44;
+    for (const [f, ms] of notes) {
+      const n = Math.round(rate * ms / 1000);
+      for (let i = 0; i < n; i++) {
+        const env = Math.min(1, i / 300, (n - i) / 600);
+        v.setInt16(o, f ? Math.sin(2 * Math.PI * f * i / rate) * 0.35 * env * 32767 : 0, true);
+        o += 2;
+      }
+    }
+    return URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
+  },
+  init() {
+    if (this.el) return;
+    this.urls = {
+      start: this.tone([[523, 120], [0, 30], [659, 120], [0, 30], [784, 180]]),
+      turn: this.tone([[660, 110], [0, 40], [880, 160]]),
+      good: this.tone([[784, 90], [0, 20], [1047, 160]]),
+    };
+    this.el = new Audio();
+    this.el.preload = 'auto';
+  },
+  // Must first be called from a tap so iOS allows later playback.
+  play(name, sig) {
+    this.init();
+    const el = this.el;
+    return new Promise((resolve, reject) => {
+      if (sig?.aborted) return reject(ABORT);
+      let done = false;
+      const finish = () => { if (done) return; done = true; clearTimeout(t); el.onended = null; sig?.removeEventListener('abort', onAbort); sig?.aborted ? reject(ABORT) : resolve(); };
+      const onAbort = () => { try { el.pause(); } catch (e) { /* ignore */ } finish(); };
+      sig?.addEventListener('abort', onAbort, { once: true });
+      const t = setTimeout(finish, 900);
+      el.onended = finish;
+      el.src = this.urls[name];
+      el.play().catch(finish);
+    });
+  },
+};
+
+// One speech-recognition attempt. Resolves { alts } or { error }.
+function recognizeS(ms, sig) {
+  return new Promise((resolve, reject) => {
+    const R = getSR();
+    if (!R) return resolve({ error: 'unsupported' });
+    if (sig.aborted) return reject(ABORT);
+    const rec = new R();
+    rec.lang = 'ja-JP'; rec.interimResults = false; rec.maxAlternatives = 5; rec.continuous = false;
+    let alts = null, err = null, done = false, t2 = null;
+    const finish = () => {
+      if (done) return; done = true;
+      clearTimeout(t); clearTimeout(t2);
+      sig.removeEventListener('abort', onAbort);
+      if (sig.aborted) return reject(ABORT);
+      resolve(alts ? { alts } : { error: err || 'no-speech' });
+    };
+    const onAbort = () => { try { rec.abort(); } catch (e) { /* ignore */ } finish(); };
+    sig.addEventListener('abort', onAbort, { once: true });
+    rec.onresult = (e) => { alts = [...e.results[0]].map((a) => a.transcript); };
+    rec.onerror = (e) => { if (e.error !== 'aborted') err = e.error; };
+    rec.onend = finish;
+    const t = setTimeout(() => { try { rec.stop(); } catch (e) { /* ignore */ } t2 = setTimeout(finish, 1500); }, ms);
+    try { rec.start(); } catch (e) { err = 'start-failed'; finish(); }
+  });
+}
+const normJa = (s) => toHira(String(s).replace(/[\s。、．，！？!?.,「」『』〜~ー・]/g, ''));
+function speechScore(alts, p) {
+  const targets = [p.kana, p.written, ...(p.alts || [])].map(normJa).filter(Boolean);
+  let best = { sim: 0, heard: alts[0] || '' };
+  for (const a of alts) {
+    const n = normJa(a);
+    for (const x of targets) {
+      const sim = 1 - levenshtein(n, x) / Math.max(n.length, x.length, 1);
+      if (sim > best.sim) best = { sim, heard: a };
+    }
+  }
+  return best;
+}
+
+// ---- screen updates (the session screen is rendered once; these patch it)
+function dShow(v) {
+  D.view = { ...D.view, ...v };
+  const s = $('.drive-screen');
+  if (!s) return;
+  const set = (sel, txt) => { const e = $(sel, s); if (e) e.textContent = txt || ''; };
+  set('.drive-phase', D.view.phase);
+  set('.drive-en', D.view.en);
+  set('.drive-jp', D.view.hideJp ? '？' : D.view.jp);
+  set('.drive-romaji', D.view.hideJp ? '' : D.view.romaji);
+  set('.drive-status', D.paused ? '⏸ Paused · tap to resume' : D.view.status);
+  const pp = $('.drive-pp', s);
+  if (pp) { pp.textContent = D.paused ? '▶' : '⏸'; pp.setAttribute('aria-label', D.paused ? 'Resume' : 'Pause'); }
+  const bar = $('.drive-progress span', s);
+  if (bar) bar.style.width = `${D.tasks.length ? (D.idx / D.tasks.length) * 100 : 0}%`;
+  s.classList.toggle('paused', D.paused);
+}
+const dStatus = (status) => dShow({ status });
+
+function recordDrive(p, ok) {
+  const r = state.drive.phr[p.id] || { c: 0, w: 0 };
+  if (ok) r.c++; else r.w++;
+  state.drive.phr[p.id] = r;
+  markActivity();
+  save();
+}
+
+// The learner's turn: tone, then listen (or a timed pause in repeat-only mode).
+// Returns 'ok' | 'close' | 'miss' | 'silent' | 'none'.
+async function yourTurn(p, sig) {
+  dStatus('🎤 Your turn');
+  await Cue.play('turn', sig);
+  if (!D.check) { await sleepS(pauseMs(p), sig); return 'none'; }
+  dStatus('🎤 Listening…');
+  const res = await recognizeS(listenMs(p), sig);
+  if (res.error) {
+    const blocked = ['not-allowed', 'service-not-allowed', 'unsupported', 'start-failed', 'audio-capture'].includes(res.error);
+    if (res.error === 'network') D.netFails++;
+    if (blocked || D.netFails >= 2) {
+      D.check = false;
+      await enS(blocked
+        ? "Speech checking isn't available here, so I'll pause for you to repeat instead."
+        : "Speech checking needs a connection, so I'll pause for you to repeat for now.", sig);
+      await Cue.play('turn', sig);
+      await sleepS(pauseMs(p), sig);
+      return 'none';
+    }
+    if (res.error === 'network') {
+      await enS('No connection for checking. Repeat after the tone.', sig);
+      await Cue.play('turn', sig);
+      await sleepS(pauseMs(p), sig);
+      return 'none';
+    }
+    dStatus('…didn’t hear anything');
+    return 'silent';
+  }
+  D.netFails = 0;
+  const { sim, heard } = speechScore(res.alts, p);
+  const r = sim >= 0.75 ? 'ok' : sim >= 0.5 ? 'close' : 'miss';
+  dStatus(`${r === 'ok' ? '✓' : r === 'close' ? '≈' : '✗'} Heard: ${heard}`);
+  return r;
+}
+const PRAISE = ['Nice!', 'Great!', 'Perfect.', 'Well done.', 'Sounds good.', 'Excellent.'];
+async function praiseS(sig) {
+  await Cue.play('good', sig);
+  await enS(PRAISE[Math.floor(Math.random() * PRAISE.length)], sig);
+}
+
+// ---- task runners
+async function learnTask({ p, pos, total }, sig) {
+  dShow({ phase: `Learn · ${pos} of ${total}`, en: p.en, jp: p.written, romaji: p.romaji, hideJp: false, status: '🔊 Listen' });
+  await enS(p.en, sig);
+  await sleepS(250, sig);
+  await jaS(p.written, sig);
+  if (p.note) { await sleepS(300, sig); await mixedS(p.note, sig); }
+  await sleepS(450, sig);
+  await jaS(p.written, sig);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const r = await yourTurn(p, sig);
+    if (r === 'none') { dStatus('🔊 Once more'); await jaS(p.written, sig); await sleepS(700, sig); return; }
+    if (r === 'ok') { recordDrive(p, true); await praiseS(sig); await sleepS(300, sig); return; }
+    if (attempt === 2) break;
+    await enS(r === 'close' ? 'Close. Once more, a little slower.' : r === 'silent' ? "I didn't catch that. Try again." : 'Not quite. Listen again.', sig);
+    dStatus('🔊 Listen');
+    await jaS(p.written, sig, 0.75);
+  }
+  recordDrive(p, false);
+  await enS("Good effort. Let's keep going.", sig);
+  await sleepS(300, sig);
+}
+
+async function recallTask({ p, unit, pos, total, label }, sig) {
+  dShow({ phase: `${label} · ${pos} of ${total}`, en: stripParen(p.en), jp: p.written, romaji: p.romaji, hideJp: true, status: '🤔 How do you say it?' });
+  await enS(`How do you say: ${stripParen(p.en)}`, sig);
+  const r = await yourTurn(p, sig);
+  dShow({ hideJp: false });
+  if (unit && r !== 'none') { D.score[unit.id] = D.score[unit.id] || {}; D.score[unit.id][p.id] = r === 'ok'; }
+  if (r === 'none') { dStatus('🔊 Answer'); await jaS(p.written, sig); await sleepS(900, sig); return; }
+  recordDrive(p, r === 'ok');
+  if (r === 'ok') { await praiseS(sig); await jaS(p.written, sig); await sleepS(500, sig); return; }
+  await enS(r === 'close' ? "Almost. It's:" : "Here's how to say it:", sig);
+  dStatus('🔊 Answer');
+  await jaS(p.written, sig);
+  await sleepS(400, sig);
+  await jaS(p.written, sig, 0.8);
+  const again = await yourTurn(p, sig);
+  if (again === 'ok') await praiseS(sig);
+  await sleepS(400, sig);
+}
+
+async function lineTask({ l, round, pos, total }, sig) {
+  const phase = `Conversation ${round === 1 ? '· with help' : '· on your own'} · ${pos} of ${total}`;
+  if (l.who === 'them') {
+    dShow({ phase, en: round === 1 ? l.en : '', jp: l.written, romaji: l.romaji, hideJp: false, status: '🗣️ They say' });
+    await jaS(l.written, sig);
+    if (round === 1) { await sleepS(250, sig); await enS(l.en, sig); }
+    await sleepS(600, sig);
+    return;
+  }
+  dShow({ phase, en: l.en, jp: l.written, romaji: l.romaji, hideJp: round === 2, status: '🗣️ Your line' });
+  if (round === 1) { await enS(`You say: ${l.en}`, sig); await jaS(l.written, sig); }
+  else await enS(`Say: ${l.en}`, sig);
+  const r = await yourTurn(l, sig);
+  dShow({ hideJp: false });
+  if (r === 'ok') { await Cue.play('good', sig); await sleepS(300, sig); return; }
+  if (r !== 'none' || round === 2) {
+    if (r !== 'none') await enS('Like this:', sig);
+    dStatus('🔊 Model');
+    await jaS(l.written, sig);
+  }
+  await sleepS(500, sig);
+}
+
+function unitTasks(ui) {
+  const u = DRIVE[ui];
+  const n = u.items.length;
+  const t = [{ type: 'say', phase: `Unit ${u.n} of ${DRIVE.length}`, title: u.title, en: `Unit ${u.n}. ${u.title}. ${u.intro}` }];
+  u.items.forEach((p, i) => t.push({ type: 'learn', p, pos: i + 1, total: n }));
+  t.push({ type: 'say', phase: 'Recall', title: u.title, en: "Now let's see what you remember. I'll say it in English, and you say it in Japanese." });
+  shuffle(u.items.slice()).forEach((p, i) => t.push({ type: 'recall', p, unit: u, pos: i + 1, total: n, label: 'Recall' }));
+  if (u.lines.length) {
+    t.push({ type: 'say', phase: 'Conversation', title: u.title, en: `${u.dialogue.intro} First, I'll help you with each of your lines.` });
+    u.lines.forEach((l, i) => t.push({ type: 'line', l, round: 1, pos: i + 1, total: u.lines.length }));
+    t.push({ type: 'say', phase: 'Conversation', title: u.title, en: "Now the same conversation again. This time, try your lines before you hear them." });
+    u.lines.forEach((l, i) => t.push({ type: 'line', l, round: 2, pos: i + 1, total: u.lines.length }));
+  }
+  t.push({ type: 'summary', ui });
+  return t;
+}
+// Phrases from finished units, weakest first.
+function reviewPicks(n, fromUnits) {
+  const pool = fromUnits.flatMap((u) => u.items);
+  return pool.map((p) => {
+    const r = state.drive.phr[p.id] || { c: 0, w: 0 };
+    return { p, k: (r.w + 1) / (r.c + r.w + 2) + Math.random() * 0.35 };
+  }).sort((a, b) => b.k - a.k).slice(0, n).map((x) => x.p);
+}
+const doneUnits = () => DRIVE.filter((u) => state.drive.units[u.id]);
+function reviewTasks(intro) {
+  const picks = reviewPicks(10, doneUnits());
+  return [
+    { type: 'say', phase: 'Review mix', title: 'Review', en: intro },
+    ...picks.map((p, i) => ({ type: 'recall', p, pos: i + 1, total: picks.length, label: 'Review' })),
+    { type: 'mixEnd' },
+  ];
+}
+
+async function summaryTask({ ui }, sig) {
+  const u = DRIVE[ui];
+  const sc = D.score[u.id] || {};
+  const checked = Object.keys(sc).length;
+  const ok = Object.values(sc).filter(Boolean).length;
+  const prev = state.drive.units[u.id];
+  state.drive.units[u.id] = { best: Math.max(ok, prev?.best || 0), total: u.items.length, checked: checked > 0 || !!prev?.checked, plays: (prev?.plays || 0) + 1, last: todayStr() };
+  if (state.drive.next <= ui) state.drive.next = Math.min(ui + 1, DRIVE.length);
+  markActivity();
+  save();
+  dShow({ phase: 'Unit complete', en: u.title, jp: '', romaji: '', status: checked ? `✓ ${ok} of ${u.items.length} remembered` : '✓ Done' });
+  await Cue.play('start', sig);
+  await enS(checked
+    ? `Unit ${u.n} complete. You remembered ${ok} of ${u.items.length} phrases. ${ok / u.items.length >= 0.8 ? 'Excellent work.' : 'Repetition is how it sticks, so we will review these again later.'}`
+    : `Unit ${u.n} complete. Nice work.`, sig);
+  if (!state.settings.driveAuto) { await enS("That's the end of this session. Drive safe.", sig); return; }
+  if (ui + 1 < DRIVE.length) {
+    D.tasks.push(...unitTasks(ui + 1));
+    await enS(`Next up, unit ${ui + 2}: ${DRIVE[ui + 1].title}.`, sig);
+  } else {
+    await enS("That's every unit. From here on, I'll keep mixing review rounds until you stop.", sig);
+    D.tasks.push(...reviewTasks("Here's a review round of phrases from all the units."));
+  }
+  await sleepS(800, sig);
+}
+
+async function runTask(t, sig) {
+  switch (t.type) {
+    case 'say':
+      dShow({ phase: t.phase, en: t.title || '', jp: '', romaji: '', hideJp: false, status: '🔊' });
+      await enS(t.en, sig);
+      await sleepS(500, sig);
+      return;
+    case 'learn': return learnTask(t, sig);
+    case 'recall': return recallTask(t, sig);
+    case 'line': return lineTask(t, sig);
+    case 'summary': return summaryTask(t, sig);
+    case 'mixEnd':
+      dShow({ phase: 'Review mix', en: 'Round complete', jp: '', romaji: '', status: '✓' });
+      if (state.settings.driveAuto) {
+        await enS("Nice. Here's another round.", sig);
+        D.tasks.push(...reviewTasks('Review round.'));
+      } else await enS("That's the end of this session. Drive safe.", sig);
+      return;
+  }
+}
+
+async function driveLoop() {
+  while (D.running) {
+    if (D.paused) { await new Promise((r) => { D.waiter = r; }); D.waiter = null; continue; }
+    if (D.idx >= D.tasks.length) break;
+    const i = D.idx;
+    D.ctl = new AbortController();
+    dShow({});
+    try {
+      await runTask(D.tasks[i], D.ctl.signal);
+      if (D.idx === i && !D.ctl.signal.aborted) D.idx = i + 1;
+    } catch (e) {
+      if (e !== ABORT) { console.error(e); if (D.idx === i) D.idx = i + 1; }
+    }
+  }
+  if (D.running) driveFinish();
+}
+
+async function keepAwake() {
+  try {
+    if (!navigator.wakeLock || document.hidden) return;
+    D.wake = await navigator.wakeLock.request('screen');
+    D.wake.addEventListener?.('release', () => { D.wake = null; });
+  } catch (e) { D.wake = null; }
+}
+document.addEventListener('visibilitychange', () => {
+  if (!D.running) return;
+  if (document.hidden) drivePause();
+  else if (!D.wake) keepAwake();
+});
+
+// Starts a session. Must be called from a tap (iOS audio unlock).
+function driveStart({ startUnit = state.drive.next, mode = 'units' } = {}) {
+  // Play a tone and a silent utterance inside the tap so iOS allows audio for the rest of the session.
+  if (Speech.supported) { const u = new SpeechSynthesisUtterance(' '); u.volume = 0; speechSynthesis.speak(u); }
+  Cue.play('start');
+  D.check = !!state.settings.driveCheck && !!getSR();
+  D.netFails = 0;
+  D.score = {};
+  D.idx = 0;
+  D.paused = false;
+  D.ended = false;
+  const ui = clamp(startUnit, 0, DRIVE.length - 1);
+  const tasks = [];
+  if (mode === 'review') {
+    tasks.push(...reviewTasks('Review mix. I will say a phrase in English, and you say it in Japanese.'));
+  } else {
+    const done = doneUnits().filter((u) => u.n - 1 !== ui);
+    if (state.settings.driveWarmup && done.length) {
+      const picks = reviewPicks(5, done);
+      tasks.push({ type: 'say', phase: 'Warm-up', title: 'Warm-up', en: "Let's warm up with a few phrases from earlier." });
+      picks.forEach((p, i) => tasks.push({ type: 'recall', p, pos: i + 1, total: picks.length, label: 'Warm-up' }));
+    }
+    tasks.push(...unitTasks(ui));
+  }
+  D.tasks = tasks;
+  D.running = true;
+  keepAwake();
+  renderDriveScreen();
+  driveLoop();
+}
+function drivePause() {
+  if (!D.running || D.paused) return;
+  D.paused = true;
+  D.ctl?.abort();
+  window.speechSynthesis?.cancel();
+  dShow({});
+}
+function driveResume() {
+  if (!D.running || !D.paused) return;
+  D.paused = false;
+  if (!D.wake) keepAwake();
+  dShow({});
+  D.waiter?.();
+}
+function driveJump(delta) {
+  if (!D.running) return;
+  D.idx = clamp(D.idx + delta, 0, Math.max(0, D.tasks.length - 1));
+  D.ctl?.abort();
+  window.speechSynthesis?.cancel();
+  dShow({});
+}
+function driveStop() {
+  if (!D.running) return;
+  D.running = false;
+  D.paused = false;
+  D.ctl?.abort();
+  D.waiter?.();
+  window.speechSynthesis?.cancel();
+  try { D.wake?.release(); } catch (e) { /* ignore */ }
+  D.wake = null;
+}
+function driveFinish() {
+  driveStop();
+  D.ended = true;
+  if ($('.drive-screen')) go('drive');
+}
+
+function renderDriveScreen() {
+  const el = app();
+  el.querySelector('.drive-screen')?.remove();
+  const s = document.createElement('div');
+  s.className = 'drive-screen';
+  s.setAttribute('role', 'region');
+  s.setAttribute('aria-label', 'Drive and Learn session');
+  s.innerHTML = `
+    <div class="drive-top">
+      <span class="drive-phase"></span>
+      <button class="drive-end" data-d="stop">End</button>
+    </div>
+    <div class="drive-progress" aria-hidden="true"><span></span></div>
+    <button class="drive-body" data-d="pause" aria-label="Pause or resume">
+      <span class="drive-en"></span>
+      <span class="drive-jp" lang="ja"></span>
+      <span class="drive-romaji"></span>
+      <span class="drive-status" aria-live="polite"></span>
+    </button>
+    <div class="drive-ctrls">
+      <button data-d="back" aria-label="Previous">⏮</button>
+      <button data-d="pause" class="drive-pp" aria-label="Pause">⏸</button>
+      <button data-d="repeat" aria-label="Repeat">🔁</button>
+      <button data-d="skip" aria-label="Skip">⏭</button>
+    </div>
+    <p class="drive-hint">Tap anywhere to pause. Eyes on the road.</p>`;
+  el.appendChild(s);
+  document.body.classList.add('noscroll');
+  s.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-d]');
+    if (!b) return;
+    switch (b.dataset.d) {
+      case 'pause': D.paused ? driveResume() : drivePause(); break;
+      case 'skip': driveJump(1); break;
+      case 'back': driveJump(-1); break;
+      case 'repeat': driveJump(0); break;
+      case 'stop': driveStop(); D.ended = true; go('drive'); break;
+    }
+  });
+  dShow({});
+}
+
+VIEWS.drive = (el) => {
+  document.body.classList.remove('noscroll');
+  cleanup = () => { driveStop(); document.body.classList.remove('noscroll'); };
+  const s = state.settings;
+  const srOk = !!getSR();
+  const next = Math.min(state.drive.next, DRIVE.length - 1);
+  const allDone = state.drive.next >= DRIVE.length;
+  const enVoices = Speech.voicesEn;
+  el.innerHTML = `
+    <header class="top"><button class="icon-btn" data-a="back" aria-label="Back">←</button><h1>Drive &amp; Learn 🚗</h1></header>
+    ${D.ended ? '<section class="card ok-card">✓ Session finished. Progress saved.</section>' : ''}
+    <section class="card">
+      <p class="small">Hands-free spoken lessons for your commute. I tell you in English what we're covering, say it in Japanese, and then you repeat after the tone${srOk && s.driveCheck ? ' while I listen and check it' : ''}. Each unit ends with a recall round and a short conversation, and then the next unit starts automatically.</p>
+      <button class="btn primary wide drive-start" data-a="start" data-u="${next}">▶ ${allDone ? 'Replay' : 'Start'} unit ${next + 1}: ${esc(DRIVE[next].title)}<small>about ${unitMinutes(DRIVE[next])} min${doneUnits().length && s.driveWarmup ? ' + warm-up' : ''}</small></button>
+      ${doneUnits().length ? '<button class="btn wide" data-a="review">🔀 Review mix (phrases from finished units)</button>' : ''}
+    </section>
+    <section class="card safety">
+      <strong>⚠️ Set it up before you drive.</strong>
+      <p class="small">Mount the phone and press Start while you're parked. Everything is spoken, so you don't need to look at the screen. If you need to pause, use the big button only when it's safe, or let a passenger do it.</p>
+    </section>
+    <section class="card">
+      <h2>Units</h2>
+      <ol class="unit-list">${DRIVE.map((u, i) => {
+        const r = state.drive.units[u.id];
+        return `<li class="unit-row ${i === next && !allDone ? 'current' : ''}">
+          <div class="unit-main">
+            <span class="lesson-n ${r ? 'done' : ''}" aria-hidden="true">${r ? '✓' : u.n}</span>
+            <span class="unit-txt"><strong>${esc(u.title)}</strong><br>
+              <span class="muted small">${u.items.length} phrases${u.lines.length ? ' · conversation' : ''} · ~${unitMinutes(u)} min${r?.checked ? ` · best ${r.best}/${r.total}` : r ? ' · done' : ''}</span></span>
+            <button class="btn" data-a="start" data-u="${i}" aria-label="Start unit ${u.n}">▶</button>
+          </div>
+          <details><summary class="small">Preview phrases</summary><ul class="list">${u.items.map(wordRow).join('')}</ul></details>
+        </li>`;
+      }).join('')}</ol>
+    </section>
+    <section class="card form">
+      <h2>Options</h2>
+      <label class="check"><input type="checkbox" data-opt="driveCheck" ${s.driveCheck && srOk ? 'checked' : ''} ${srOk ? '' : 'disabled'}> Check my pronunciation</label>
+      <p class="muted small">${srOk ? 'Uses the iPhone speech recognizer (usually needs a data connection). Turn it off to just repeat during a timed pause.' : 'Speech recognition is not available in this browser, so you repeat during a timed pause.'}</p>
+      ${srOk ? '<button class="btn" data-a="mic">🎤 Test my mic (say こんにちは)</button><div class="feedback" id="micOut" aria-live="polite"></div>' : ''}
+      <label class="check"><input type="checkbox" data-opt="driveWarmup" ${s.driveWarmup ? 'checked' : ''}> Start with a warm-up from earlier units</label>
+      <label class="check"><input type="checkbox" data-opt="driveAuto" ${s.driveAuto ? 'checked' : ''}> Keep going to the next unit automatically</label>
+      <fieldset><legend>Time to repeat</legend>
+        <div class="seg small">${[['short', 'Short'], ['normal', 'Normal'], ['long', 'Long']].map(([v, n]) => `<label><input type="radio" name="drivePause" value="${v}" ${s.drivePause === v ? 'checked' : ''}><span>${n}</span></label>`).join('')}</div>
+      </fieldset>
+      <label>English voice <select id="voiceEnSel" class="select">${enVoices.length
+        ? enVoices.map((v) => `<option value="${esc(v.voiceURI)}" ${Speech.voiceEn()?.voiceURI === v.voiceURI ? 'selected' : ''}>${esc(v.name)} (${esc(v.lang)})</option>`).join('')
+        : '<option value="">Default English voice</option>'}</select></label>
+      <label>Japanese speed: <strong id="dRateVal">${s.rate.toFixed(2)}×</strong>
+        <input type="range" id="dRate" min="0.5" max="1.2" step="0.05" value="${s.rate}"></label>
+      <button class="btn" data-a="testvoices">🔊 Test voices</button>
+    </section>
+    <section class="card small">
+      <h2>iPhone tips</h2>
+      <ul class="tips">
+        <li>Keep the app open on screen. iOS pauses it if the screen locks or you switch apps, so tap ▶ to resume. ${'wakeLock' in navigator ? 'The app asks the screen to stay on during a session.' : 'Set <strong>Settings › Display &amp; Brightness › Auto-Lock</strong> to Never while driving.'}</li>
+        <li>Audio goes through your car over Bluetooth or CarPlay. With pronunciation checking on, the car's microphone may be used.</li>
+        <li>If the voice gets quiet or switches to the earpiece after listening, turn off pronunciation checking. That's an iOS audio quirk.</li>
+        <li>Run <strong>Test my mic</strong> once while parked so iOS asks for microphone and speech permission before you drive.</li>
+      </ul>
+    </section>`;
+
+  const refreshVoices = () => { const sel = $('#voiceEnSel', el); if (sel && Speech.voicesEn.length) sel.innerHTML = Speech.voicesEn.map((v) => `<option value="${esc(v.voiceURI)}" ${Speech.voiceEn()?.voiceURI === v.voiceURI ? 'selected' : ''}>${esc(v.name)} (${esc(v.lang)})</option>`).join(''); };
+  document.addEventListener('voices-ready', refreshVoices);
+  const prevCleanup = cleanup;
+  cleanup = () => { prevCleanup(); document.removeEventListener('voices-ready', refreshVoices); };
+
+  el.onchange = (e) => {
+    const t = e.target;
+    if (t.dataset.opt) { s[t.dataset.opt] = t.checked; save(); if (t.dataset.opt === 'driveWarmup') go('drive'); }
+    if (t.name === 'drivePause') { s.drivePause = t.value; save(); }
+    if (t.id === 'voiceEnSel') { s.voiceEnURI = t.value; save(); Speech.speakEn('This is the English voice.'); }
+  };
+  el.oninput = (e) => {
+    if (e.target.id === 'dRate') { s.rate = Number(e.target.value); $('#dRateVal', el).textContent = `${s.rate.toFixed(2)}×`; save(); }
+  };
+  el.onclick = async (e) => {
+    if (handleWordRowClick(e)) return;
+    const b = e.target.closest('[data-a]');
+    if (!b) return;
+    switch (b.dataset.a) {
+      case 'back': go('practice'); break;
+      case 'start': driveStart({ startUnit: Number(b.dataset.u) }); break;
+      case 'review': driveStart({ mode: 'review' }); break;
+      case 'testvoices': await Speech.speakEn('This is the English voice.'); await Speech.speak('こちらは日本語の声です。'); break;
+      case 'mic': {
+        const out = $('#micOut', el);
+        out.innerHTML = '<p class="listening">🎤 Listening… say こんにちは</p>';
+        b.disabled = true;
+        const ctl = new AbortController();
+        cleanup = ((c) => () => { ctl.abort(); c(); })(cleanup);
+        try {
+          const r = await recognizeS(6000, ctl.signal);
+          if (r.error) out.innerHTML = `<p class="no">Speech check didn't work here (${esc(r.error)}). Drive & Learn will use timed pauses instead.</p>`;
+          else {
+            const { sim, heard } = speechScore(r.alts, { kana: 'こんにちは', written: 'こんにちは' });
+            out.innerHTML = `<div class="${sim >= 0.75 ? 'ok' : 'close'}">${sim >= 0.75 ? '✓ Working.' : '≈ Heard something.'} Heard: ${jp(heard)}</div>`;
+          }
+        } catch (err) { /* navigated away */ }
+        b.disabled = false;
+        break;
+      }
     }
   };
 };

@@ -1,6 +1,6 @@
 // Offline support: caches the app shell on install and serves it cache-first.
 // Bump VERSION whenever you change any file so phones pick up the update.
-const VERSION = 'nihongo-dojo-v2';
+const VERSION = 'nihongo-dojo-v3';
 const ASSETS = [
   './',
   './index.html',
@@ -9,6 +9,7 @@ const ASSETS = [
   './data.js',
   './kanji.js',
   './grammar.js',
+  './drive.js',
   './strokes.js',
   './manifest.webmanifest',
   './icons/apple-touch-icon.png',
